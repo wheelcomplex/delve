@@ -361,7 +361,7 @@ func scopePrefix(t *Term, cmdstr string) error {
 			if err != nil {
 				return err
 			}
-			printStack(stack, "")
+			PrintStack(stack, "")
 			return nil
 		case "locals":
 			return callFilterSortAndOutput(locals, rest)
@@ -763,7 +763,7 @@ func stackCommand(t *Term, args string) error {
 	if err != nil {
 		return err
 	}
-	printStack(stack, "")
+	PrintStack(stack, "")
 	return nil
 }
 
@@ -822,7 +822,10 @@ func digits(n int) int {
 	return int(math.Floor(math.Log10(float64(n)))) + 1
 }
 
-func printStack(stack []api.Stackframe, ind string) {
+func PrintStack(stack []api.Stackframe, ind string) {
+	if len(stack) == 0 {
+		return
+	}
 	d := digits(len(stack) - 1)
 	fmtstr := "%s%" + strconv.Itoa(d) + "d  0x%016x in %s\n"
 	s := strings.Repeat(" ", d+2+len(ind))
@@ -924,7 +927,7 @@ func printcontextThread(t *Term, th *api.Thread) {
 
 		if bpi.Stacktrace != nil {
 			fmt.Printf("\tStack:\n")
-			printStack(bpi.Stacktrace, "\t\t")
+			PrintStack(bpi.Stacktrace, "\t\t")
 		}
 	}
 }

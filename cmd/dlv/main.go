@@ -137,7 +137,7 @@ starts and attaches to it, and enables you to immediately begin debugging your p
 	rootCommand.AddCommand(execCommand)
 
 	// 'trace' subcommand.
-	var traceAttachPid int
+	var traceAttachPid, traceStackDepth int
 	traceCommand := &cobra.Command{
 		Use:   "trace [regexp]",
 		Short: "Compile and begin tracing program.",
@@ -189,7 +189,7 @@ starts and attaches to it, and enables you to immediately begin debugging your p
 					return 1
 				}
 				for i := range funcs {
-					_, err := client.CreateBreakpoint(&api.Breakpoint{FunctionName: funcs[i], Tracepoint: true})
+					_, err := client.CreateBreakpoint(&api.Breakpoint{FunctionName: funcs[i], Tracepoint: true, Stacktrace: traceStackDepth})
 					if err != nil {
 						fmt.Fprintln(os.Stderr, err)
 						return 1
@@ -220,6 +220,7 @@ starts and attaches to it, and enables you to immediately begin debugging your p
 								for _, arg := range th.BreakpointInfo.Arguments {
 									args = append(args, arg.SinglelineString())
 								}
+								terminal.PrintStack(th.BreakpointInfo.Stacktrace, "")
 							}
 							fmt.Printf("%s(%s) %s:%d\n", fname, strings.Join(args, ", "), terminal.ShortenFilePath(th.File), th.Line)
 						}
@@ -233,6 +234,7 @@ starts and attaches to it, and enables you to immediately begin debugging your p
 		},
 	}
 	traceCommand.Flags().IntVarP(&traceAttachPid, "pid", "p", 0, "Pid to attach to.")
+	traceCommand.Flags().IntVarP(&traceStackDepth, "stack", "s", 0, "Show stack trace with given depth.")
 	rootCommand.AddCommand(traceCommand)
 
 	// 'test' subcommand.
