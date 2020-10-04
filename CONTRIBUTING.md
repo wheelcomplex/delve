@@ -4,11 +4,9 @@ Want to help contribute to Delve? Great! Any and all help is certainly appreciat
 
 If you are planning to contribute a significant change, please draft a design document (or start a conversation) and post it to the [developer mailing list](https://groups.google.com/forum/#!forum/delve-dev). This will allow other developers and users to discuss the proposed change.
 
-If you'd like to join the discussion, join the gitter chat (link in README).
-
 ## Filing issues
 
-When filing an issue, make sure to answer these five questions:
+When filing an issue, make sure to answer these six questions:
 
 1. What version of Delve are you using (`dlv version`)?
 2. What version of Go are you using? (`go version`)?

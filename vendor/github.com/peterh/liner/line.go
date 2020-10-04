@@ -3,10 +3,12 @@
 package liner
 
 import (
+	"bufio"
 	"container/ring"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -90,6 +92,18 @@ const (
 )
 
 func (s *State) refresh(prompt []rune, buf []rune, pos int) error {
+	if s.columns == 0 {
+		return ErrInternal
+	}
+
+	s.needRefresh = false
+	if s.multiLineMode {
+		return s.refreshMultiLine(prompt, buf, pos)
+	}
+	return s.refreshSingleLine(prompt, buf, pos)
+}
+
+func (s *State) refreshSingleLine(prompt []rune, buf []rune, pos int) error {
 	s.cursorPos(0)
 	_, err := fmt.Print(string(prompt))
 	if err != nil {
@@ -143,6 +157,82 @@ func (s *State) refresh(prompt []rune, buf []rune, pos int) error {
 		s.cursorPos(pLen + pos)
 	}
 	return err
+}
+
+func (s *State) refreshMultiLine(prompt []rune, buf []rune, pos int) error {
+	promptColumns := countMultiLineGlyphs(prompt, s.columns, 0)
+	totalColumns := countMultiLineGlyphs(buf, s.columns, promptColumns)
+	totalRows := (totalColumns + s.columns - 1) / s.columns
+	maxRows := s.maxRows
+	if totalRows > s.maxRows {
+		s.maxRows = totalRows
+	}
+	cursorRows := s.cursorRows
+	if cursorRows == 0 {
+		cursorRows = 1
+	}
+
+	/* First step: clear all the lines used before. To do so start by
+	* going to the last row. */
+	if maxRows-cursorRows > 0 {
+		s.moveDown(maxRows - cursorRows)
+	}
+
+	/* Now for every row clear it, go up. */
+	for i := 0; i < maxRows-1; i++ {
+		s.cursorPos(0)
+		s.eraseLine()
+		s.moveUp(1)
+	}
+
+	/* Clean the top line. */
+	s.cursorPos(0)
+	s.eraseLine()
+
+	/* Write the prompt and the current buffer content */
+	if _, err := fmt.Print(string(prompt)); err != nil {
+		return err
+	}
+	if _, err := fmt.Print(string(buf)); err != nil {
+		return err
+	}
+
+	/* If we are at the very end of the screen with our prompt, we need to
+	 * emit a newline and move the prompt to the first column. */
+	cursorColumns := countMultiLineGlyphs(buf[:pos], s.columns, promptColumns)
+	if cursorColumns == totalColumns && totalColumns%s.columns == 0 {
+		s.emitNewLine()
+		s.cursorPos(0)
+		totalRows++
+		if totalRows > s.maxRows {
+			s.maxRows = totalRows
+		}
+	}
+
+	/* Move cursor to right position. */
+	cursorRows = (cursorColumns + s.columns) / s.columns
+	if s.cursorRows > 0 && totalRows-cursorRows > 0 {
+		s.moveUp(totalRows - cursorRows)
+	}
+	/* Set column. */
+	s.cursorPos(cursorColumns % s.columns)
+
+	s.cursorRows = cursorRows
+	return nil
+}
+
+func (s *State) resetMultiLine(prompt []rune, buf []rune, pos int) {
+	columns := countMultiLineGlyphs(prompt, s.columns, 0)
+	columns = countMultiLineGlyphs(buf[:pos], s.columns, columns)
+	columns += 2 // ^C
+	cursorRows := (columns + s.columns) / s.columns
+	if s.maxRows-cursorRows > 0 {
+		for i := 0; i < s.maxRows-cursorRows; i++ {
+			fmt.Println() // always moves the cursor down or scrolls the window up as needed
+		}
+	}
+	s.maxRows = 1
+	s.cursorRows = 0
 }
 
 func longestCommonPrefix(strs []string) string {
@@ -215,6 +305,7 @@ func (s *State) printedTabs(items []string) func(tabDirection) (string, error) {
 		if numTabs == 2 {
 			if len(items) > 100 {
 				fmt.Printf("\nDisplay all %d possibilities? (y or n) ", len(items))
+			prompt:
 				for {
 					next, err := s.readNext()
 					if err != nil {
@@ -222,10 +313,13 @@ func (s *State) printedTabs(items []string) func(tabDirection) (string, error) {
 					}
 
 					if key, ok := next.(rune); ok {
-						if unicode.ToLower(key) == 'n' {
+						switch key {
+						case 'n', 'N':
 							return prefix, nil
-						} else if unicode.ToLower(key) == 'y' {
-							break
+						case 'y', 'Y':
+							break prompt
+						case ctrlC, ctrlD, cr, lf:
+							s.restartPrompt()
 						}
 					}
 				}
@@ -263,8 +357,8 @@ func (s *State) tabComplete(p []rune, line []rune, pos int) ([]rune, int, interf
 	}
 	hl := utf8.RuneCountInString(head)
 	if len(list) == 1 {
-		s.refresh(p, []rune(head+list[0]+tail), hl+utf8.RuneCountInString(list[0]))
-		return []rune(head + list[0] + tail), hl + utf8.RuneCountInString(list[0]), rune(esc), nil
+		err := s.refresh(p, []rune(head+list[0]+tail), hl+utf8.RuneCountInString(list[0]))
+		return []rune(head + list[0] + tail), hl + utf8.RuneCountInString(list[0]), rune(esc), err
 	}
 
 	direction := tabForward
@@ -278,7 +372,10 @@ func (s *State) tabComplete(p []rune, line []rune, pos int) ([]rune, int, interf
 		if err != nil {
 			return line, pos, rune(esc), err
 		}
-		s.refresh(p, []rune(head+pick+tail), hl+utf8.RuneCountInString(pick))
+		err = s.refresh(p, []rune(head+pick+tail), hl+utf8.RuneCountInString(pick))
+		if err != nil {
+			return line, pos, rune(esc), err
+		}
 
 		next, err := s.readNext()
 		if err != nil {
@@ -299,14 +396,15 @@ func (s *State) tabComplete(p []rune, line []rune, pos int) ([]rune, int, interf
 		}
 		return []rune(head + pick + tail), hl + utf8.RuneCountInString(pick), next, nil
 	}
-	// Not reached
-	return line, pos, rune(esc), nil
 }
 
 // reverse intelligent search, implements a bash-like history search.
 func (s *State) reverseISearch(origLine []rune, origPos int) ([]rune, int, interface{}, error) {
 	p := "(reverse-i-search)`': "
-	s.refresh([]rune(p), origLine, origPos)
+	err := s.refresh([]rune(p), origLine, origPos)
+	if err != nil {
+		return origLine, origPos, rune(esc), err
+	}
 
 	line := []rune{}
 	pos := 0
@@ -392,7 +490,10 @@ func (s *State) reverseISearch(origLine []rune, origPos int) ([]rune, int, inter
 		case action:
 			return []rune(foundLine), foundPos, next, err
 		}
-		s.refresh(getLine())
+		err = s.refresh(getLine())
+		if err != nil {
+			return []rune(foundLine), foundPos, rune(esc), err
+		}
 	}
 }
 
@@ -449,7 +550,10 @@ func (s *State) yank(p []rune, text []rune, pos int) ([]rune, int, interface{}, 
 		line = append(line, lineEnd...)
 
 		pos = len(lineStart) + len(value)
-		s.refresh(p, line, pos)
+		err := s.refresh(p, line, pos)
+		if err != nil {
+			return line, pos, 0, err
+		}
 
 		next, err := s.readNext()
 		if err != nil {
@@ -468,16 +572,33 @@ func (s *State) yank(p []rune, text []rune, pos int) ([]rune, int, interface{}, 
 			}
 		}
 	}
-
-	return line, pos, esc, nil
 }
 
 // Prompt displays p and returns a line of user input, not including a trailing
 // newline character. An io.EOF error is returned if the user signals end-of-file
 // by pressing Ctrl-D. Prompt allows line editing if the terminal supports it.
 func (s *State) Prompt(prompt string) (string, error) {
+	return s.PromptWithSuggestion(prompt, "", 0)
+}
+
+// PromptWithSuggestion displays prompt and an editable text with cursor at
+// given position. The cursor will be set to the end of the line if given position
+// is negative or greater than length of text. Returns a line of user input, not
+// including a trailing newline character. An io.EOF error is returned if the user
+// signals end-of-file by pressing Ctrl-D.
+func (s *State) PromptWithSuggestion(prompt string, text string, pos int) (string, error) {
+	for _, r := range prompt {
+		if unicode.Is(unicode.C, r) {
+			return "", ErrInvalidPrompt
+		}
+	}
 	if s.inputRedirected || !s.terminalSupported {
 		return s.promptUnsupported(prompt)
+	}
+	p := []rune(prompt)
+	const minWorkingSpace = 10
+	if s.columns < countGlyphs(p)+minWorkingSpace {
+		return s.tooNarrow(prompt)
 	}
 	if s.outputRedirected {
 		return "", ErrNotTerminalOutput
@@ -486,24 +607,39 @@ func (s *State) Prompt(prompt string) (string, error) {
 	s.historyMutex.RLock()
 	defer s.historyMutex.RUnlock()
 
-	s.startPrompt()
-	defer s.stopPrompt()
-	s.getColumns()
-
 	fmt.Print(prompt)
-	p := []rune(prompt)
-	var line []rune
-	pos := 0
+	var line = []rune(text)
 	historyEnd := ""
-	prefixHistory := s.getHistoryByPrefix(string(line))
-	historyPos := len(prefixHistory)
+	var historyPrefix []string
+	historyPos := 0
+	historyStale := true
 	historyAction := false // used to mark history related actions
 	killAction := 0        // used to mark kill related actions
+
+	defer s.stopPrompt()
+
+	if pos < 0 || len(text) < pos {
+		pos = len(text)
+	}
+	if len(line) > 0 {
+		err := s.refresh(p, line, pos)
+		if err != nil {
+			return "", err
+		}
+	}
+
+restart:
+	s.startPrompt()
+	s.getColumns()
+
 mainLoop:
 	for {
 		next, err := s.readNext()
 	haveNext:
 		if err != nil {
+			if s.shouldRestart != nil && s.shouldRestart(err) {
+				goto restart
+			}
 			return "", err
 		}
 
@@ -512,25 +648,34 @@ mainLoop:
 		case rune:
 			switch v {
 			case cr, lf:
+				if s.needRefresh {
+					err := s.refresh(p, line, pos)
+					if err != nil {
+						return "", err
+					}
+				}
+				if s.multiLineMode {
+					s.resetMultiLine(p, line, pos)
+				}
 				fmt.Println()
 				break mainLoop
 			case ctrlA: // Start of line
 				pos = 0
-				s.refresh(p, line, pos)
+				s.needRefresh = true
 			case ctrlE: // End of line
 				pos = len(line)
-				s.refresh(p, line, pos)
+				s.needRefresh = true
 			case ctrlB: // left
 				if pos > 0 {
 					pos -= len(getSuffixGlyphs(line[:pos], 1))
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				} else {
 					fmt.Print(beep)
 				}
 			case ctrlF: // right
 				if pos < len(line) {
 					pos += len(getPrefixGlyphs(line[pos:], 1))
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				} else {
 					fmt.Print(beep)
 				}
@@ -549,7 +694,7 @@ mainLoop:
 				} else {
 					n := len(getPrefixGlyphs(line[pos:], 1))
 					line = append(line[:pos], line[pos+n:]...)
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				}
 			case ctrlK: // delete remainder of line
 				if pos >= len(line) {
@@ -563,32 +708,42 @@ mainLoop:
 
 					killAction = 2 // Mark that there was a kill action
 					line = line[:pos]
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				}
 			case ctrlP: // up
 				historyAction = true
+				if historyStale {
+					historyPrefix = s.getHistoryByPrefix(string(line))
+					historyPos = len(historyPrefix)
+					historyStale = false
+				}
 				if historyPos > 0 {
-					if historyPos == len(prefixHistory) {
+					if historyPos == len(historyPrefix) {
 						historyEnd = string(line)
 					}
 					historyPos--
-					line = []rune(prefixHistory[historyPos])
+					line = []rune(historyPrefix[historyPos])
 					pos = len(line)
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				} else {
 					fmt.Print(beep)
 				}
 			case ctrlN: // down
 				historyAction = true
-				if historyPos < len(prefixHistory) {
+				if historyStale {
+					historyPrefix = s.getHistoryByPrefix(string(line))
+					historyPos = len(historyPrefix)
+					historyStale = false
+				}
+				if historyPos < len(historyPrefix) {
 					historyPos++
-					if historyPos == len(prefixHistory) {
+					if historyPos == len(historyPrefix) {
 						line = []rune(historyEnd)
 					} else {
-						line = []rune(prefixHistory[historyPos])
+						line = []rune(historyPrefix[historyPos])
 					}
 					pos = len(line)
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				} else {
 					fmt.Print(beep)
 				}
@@ -606,13 +761,16 @@ mainLoop:
 					copy(line[pos-len(prev):], next)
 					copy(line[pos-len(prev)+len(next):], scratch)
 					pos += len(next)
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				}
 			case ctrlL: // clear screen
 				s.eraseScreen()
-				s.refresh(p, line, pos)
+				s.needRefresh = true
 			case ctrlC: // reset
 				fmt.Println("^C")
+				if s.multiLineMode {
+					s.resetMultiLine(p, line, pos)
+				}
 				if s.ctrlCAborts {
 					return "", ErrPromptAborted
 				}
@@ -627,7 +785,7 @@ mainLoop:
 					n := len(getSuffixGlyphs(line[:pos], 1))
 					line = append(line[:pos-n], line[pos:]...)
 					pos -= n
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				}
 			case ctrlU: // Erase line before cursor
 				if killAction > 0 {
@@ -639,7 +797,7 @@ mainLoop:
 				killAction = 2 // Mark that there was some killing
 				line = line[pos:]
 				pos = 0
-				s.refresh(p, line, pos)
+				s.needRefresh = true
 			case ctrlW: // Erase word
 				if pos == 0 {
 					fmt.Print(beep)
@@ -676,13 +834,13 @@ mainLoop:
 				}
 				killAction = 2 // Mark that there was some killing
 
-				s.refresh(p, line, pos)
+				s.needRefresh = true
 			case ctrlY: // Paste from Yank buffer
 				line, pos, next, err = s.yank(p, line, pos)
 				goto haveNext
 			case ctrlR: // Reverse Search
 				line, pos, next, err = s.reverseISearch(line, pos)
-				s.refresh(p, line, pos)
+				s.needRefresh = true
 				goto haveNext
 			case tab: // Tab completion
 				line, pos, next, err = s.tabComplete(p, line, pos)
@@ -697,14 +855,16 @@ mainLoop:
 			case 0, 28, 29, 30, 31:
 				fmt.Print(beep)
 			default:
-				if pos == len(line) && len(p)+len(line) < s.columns-1 {
+				if pos == len(line) && !s.multiLineMode &&
+					len(p)+len(line) < s.columns*4 && // Avoid countGlyphs on large lines
+					countGlyphs(p)+countGlyphs(line) < s.columns-1 {
 					line = append(line, v)
 					fmt.Printf("%c", v)
 					pos++
 				} else {
 					line = append(line[:pos], append([]rune{v}, line[pos:]...)...)
 					pos++
-					s.refresh(p, line, pos)
+					s.needRefresh = true
 				}
 			}
 		case action:
@@ -772,24 +932,34 @@ mainLoop:
 				}
 			case up:
 				historyAction = true
+				if historyStale {
+					historyPrefix = s.getHistoryByPrefix(string(line))
+					historyPos = len(historyPrefix)
+					historyStale = false
+				}
 				if historyPos > 0 {
-					if historyPos == len(prefixHistory) {
+					if historyPos == len(historyPrefix) {
 						historyEnd = string(line)
 					}
 					historyPos--
-					line = []rune(prefixHistory[historyPos])
+					line = []rune(historyPrefix[historyPos])
 					pos = len(line)
 				} else {
 					fmt.Print(beep)
 				}
 			case down:
 				historyAction = true
-				if historyPos < len(prefixHistory) {
+				if historyStale {
+					historyPrefix = s.getHistoryByPrefix(string(line))
+					historyPos = len(historyPrefix)
+					historyStale = false
+				}
+				if historyPos < len(historyPrefix) {
 					historyPos++
-					if historyPos == len(prefixHistory) {
+					if historyPos == len(historyPrefix) {
 						line = []rune(historyEnd)
 					} else {
-						line = []rune(prefixHistory[historyPos])
+						line = []rune(historyPrefix[historyPos])
 					}
 					pos = len(line)
 				} else {
@@ -799,12 +969,30 @@ mainLoop:
 				pos = 0
 			case end: // End of line
 				pos = len(line)
+			case winch: // Window change
+				if s.multiLineMode {
+					if s.maxRows-s.cursorRows > 0 {
+						s.moveDown(s.maxRows - s.cursorRows)
+					}
+					for i := 0; i < s.maxRows-1; i++ {
+						s.cursorPos(0)
+						s.eraseLine()
+						s.moveUp(1)
+					}
+					s.maxRows = 1
+					s.cursorRows = 1
+				}
 			}
-			s.refresh(p, line, pos)
+			s.needRefresh = true
+		}
+		if s.needRefresh && !s.inputWaiting() {
+			err := s.refresh(p, line, pos)
+			if err != nil {
+				return "", err
+			}
 		}
 		if !historyAction {
-			prefixHistory = s.getHistoryByPrefix(string(line))
-			historyPos = len(prefixHistory)
+			historyStale = true
 		}
 		if killAction > 0 {
 			killAction--
@@ -816,7 +1004,12 @@ mainLoop:
 // PasswordPrompt displays p, and then waits for user input. The input typed by
 // the user is not displayed in the terminal.
 func (s *State) PasswordPrompt(prompt string) (string, error) {
-	if !s.terminalSupported {
+	for _, r := range prompt {
+		if unicode.Is(unicode.C, r) {
+			return "", ErrInvalidPrompt
+		}
+	}
+	if !s.terminalSupported || s.columns == 0 {
 		return "", errors.New("liner: function not supported in this terminal")
 	}
 	if s.inputRedirected {
@@ -826,12 +1019,19 @@ func (s *State) PasswordPrompt(prompt string) (string, error) {
 		return "", ErrNotTerminalOutput
 	}
 
-	s.startPrompt()
+	p := []rune(prompt)
+	const minWorkingSpace = 1
+	if s.columns < countGlyphs(p)+minWorkingSpace {
+		return s.tooNarrow(prompt)
+	}
+
 	defer s.stopPrompt()
+
+restart:
+	s.startPrompt()
 	s.getColumns()
 
 	fmt.Print(prompt)
-	p := []rune(prompt)
 	var line []rune
 	pos := 0
 
@@ -839,6 +1039,9 @@ mainLoop:
 	for {
 		next, err := s.readNext()
 		if err != nil {
+			if s.shouldRestart != nil && s.shouldRestart(err) {
+				goto restart
+			}
 			return "", err
 		}
 
@@ -846,6 +1049,15 @@ mainLoop:
 		case rune:
 			switch v {
 			case cr, lf:
+				if s.needRefresh {
+					err := s.refresh(p, line, pos)
+					if err != nil {
+						return "", err
+					}
+				}
+				if s.multiLineMode {
+					s.resetMultiLine(p, line, pos)
+				}
 				fmt.Println()
 				break mainLoop
 			case ctrlD: // del
@@ -859,7 +1071,10 @@ mainLoop:
 				s.restartPrompt()
 			case ctrlL: // clear screen
 				s.eraseScreen()
-				s.refresh(p, []rune{}, 0)
+				err := s.refresh(p, []rune{}, 0)
+				if err != nil {
+					return "", err
+				}
 			case ctrlH, bs: // Backspace
 				if pos <= 0 {
 					fmt.Print(beep)
@@ -870,6 +1085,9 @@ mainLoop:
 				}
 			case ctrlC:
 				fmt.Println("^C")
+				if s.multiLineMode {
+					s.resetMultiLine(p, line, pos)
+				}
 				if s.ctrlCAborts {
 					return "", ErrPromptAborted
 				}
@@ -891,4 +1109,21 @@ mainLoop:
 		}
 	}
 	return string(line), nil
+}
+
+func (s *State) tooNarrow(prompt string) (string, error) {
+	// Docker and OpenWRT and etc sometimes return 0 column width
+	// Reset mode temporarily. Restore baked mode in case the terminal
+	// is wide enough for the next Prompt attempt.
+	m, merr := TerminalMode()
+	s.origMode.ApplyMode()
+	if merr == nil {
+		defer m.ApplyMode()
+	}
+	if s.r == nil {
+		// Windows does not always set s.r
+		s.r = bufio.NewReader(os.Stdin)
+		defer func() { s.r = nil }()
+	}
+	return s.promptUnsupported(prompt)
 }

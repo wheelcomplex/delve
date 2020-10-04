@@ -13,18 +13,16 @@
 //
 //
 
-// Blackfriday markdown processor.
-//
-// Translates plain text with simple formatting rules into HTML or LaTeX.
 package blackfriday
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 )
 
-const VERSION = "1.1"
+const VERSION = "1.5"
 
 // These are the supported markdown parsing extensions.
 // OR these values together to select multiple extensions.
@@ -45,11 +43,13 @@ const (
 	EXTENSION_AUTO_HEADER_IDS                        // Create the header ID from the text
 	EXTENSION_BACKSLASH_LINE_BREAK                   // translate trailing backslashes into line breaks
 	EXTENSION_DEFINITION_LISTS                       // render definition lists
+	EXTENSION_JOIN_LINES                             // delete newline and join lines
 
 	commonHtmlFlags = 0 |
 		HTML_USE_XHTML |
 		HTML_USE_SMARTYPANTS |
 		HTML_SMARTYPANTS_FRACTIONS |
+		HTML_SMARTYPANTS_DASHES |
 		HTML_SMARTYPANTS_LATEX_DASHES
 
 	commonExtensions = 0 |
@@ -100,45 +100,49 @@ const (
 	TAB_SIZE_EIGHT   = 8
 )
 
-// These are the tags that are recognized as HTML block tags.
+// blockTags is a set of tags that are recognized as HTML block tags.
 // Any of these can be included in markdown text without special escaping.
-var blockTags = map[string]bool{
-	"p":          true,
-	"dl":         true,
-	"h1":         true,
-	"h2":         true,
-	"h3":         true,
-	"h4":         true,
-	"h5":         true,
-	"h6":         true,
-	"ol":         true,
-	"ul":         true,
-	"del":        true,
-	"div":        true,
-	"ins":        true,
-	"pre":        true,
-	"form":       true,
-	"math":       true,
-	"table":      true,
-	"iframe":     true,
-	"script":     true,
-	"fieldset":   true,
-	"noscript":   true,
-	"blockquote": true,
+var blockTags = map[string]struct{}{
+	"blockquote": {},
+	"del":        {},
+	"div":        {},
+	"dl":         {},
+	"fieldset":   {},
+	"form":       {},
+	"h1":         {},
+	"h2":         {},
+	"h3":         {},
+	"h4":         {},
+	"h5":         {},
+	"h6":         {},
+	"iframe":     {},
+	"ins":        {},
+	"math":       {},
+	"noscript":   {},
+	"ol":         {},
+	"pre":        {},
+	"p":          {},
+	"script":     {},
+	"style":      {},
+	"table":      {},
+	"ul":         {},
 
 	// HTML5
-	"video":      true,
-	"aside":      true,
-	"canvas":     true,
-	"figure":     true,
-	"footer":     true,
-	"header":     true,
-	"hgroup":     true,
-	"output":     true,
-	"article":    true,
-	"section":    true,
-	"progress":   true,
-	"figcaption": true,
+	"address":    {},
+	"article":    {},
+	"aside":      {},
+	"canvas":     {},
+	"figcaption": {},
+	"figure":     {},
+	"footer":     {},
+	"header":     {},
+	"hgroup":     {},
+	"main":       {},
+	"nav":        {},
+	"output":     {},
+	"progress":   {},
+	"section":    {},
+	"video":      {},
 }
 
 // Renderer is the rendering interface.
@@ -155,7 +159,7 @@ var blockTags = map[string]bool{
 // Currently Html and Latex implementations are provided
 type Renderer interface {
 	// block-level callbacks
-	BlockCode(out *bytes.Buffer, text []byte, lang string)
+	BlockCode(out *bytes.Buffer, text []byte, infoString string)
 	BlockQuote(out *bytes.Buffer, text []byte)
 	BlockHtml(out *bytes.Buffer, text []byte)
 	Header(out *bytes.Buffer, text func() bool, level int, id string)
@@ -214,7 +218,8 @@ type parser struct {
 	// Footnotes need to be ordered as well as available to quickly check for
 	// presence. If a ref is also a footnote, it's stored both in refs and here
 	// in notes. Slice is nil if footnotes not enabled.
-	notes []*reference
+	notes       []*reference
+	notesRecord map[string]struct{}
 }
 
 func (p *parser) getRef(refid string) (ref *reference, found bool) {
@@ -235,6 +240,11 @@ func (p *parser) getRef(refid string) (ref *reference, found bool) {
 	// refs are case insensitive
 	ref, found = p.refs[strings.ToLower(refid)]
 	return ref, found
+}
+
+func (p *parser) isFootnote(ref *reference) bool {
+	_, ok := p.notesRecord[string(ref.link)]
+	return ok
 }
 
 //
@@ -372,6 +382,7 @@ func MarkdownOptions(input []byte, renderer Renderer, opts Options) []byte {
 
 	if extensions&EXTENSION_FOOTNOTES != 0 {
 		p.notes = make([]*reference, 0)
+		p.notesRecord = make(map[string]struct{})
 	}
 
 	first := firstPass(p, input)
@@ -380,61 +391,56 @@ func MarkdownOptions(input []byte, renderer Renderer, opts Options) []byte {
 }
 
 // first pass:
-// - extract references
-// - expand tabs
 // - normalize newlines
+// - extract references (outside of fenced code blocks)
+// - expand tabs (outside of fenced code blocks)
 // - copy everything else
-// - add missing newlines before fenced code blocks
 func firstPass(p *parser, input []byte) []byte {
 	var out bytes.Buffer
 	tabSize := TAB_SIZE_DEFAULT
 	if p.flags&EXTENSION_TAB_SIZE_EIGHT != 0 {
 		tabSize = TAB_SIZE_EIGHT
 	}
-	beg, end := 0, 0
-	lastLineWasBlank := false
+	beg := 0
 	lastFencedCodeBlockEnd := 0
-	for beg < len(input) { // iterate over lines
-		if end = isReference(p, input[beg:], tabSize); end > 0 {
-			beg += end
-		} else { // skip to the next line
-			end = beg
-			for end < len(input) && input[end] != '\n' && input[end] != '\r' {
-				end++
-			}
-
-			if p.flags&EXTENSION_FENCED_CODE != 0 {
-				// when last line was none blank and a fenced code block comes after
-				if beg >= lastFencedCodeBlockEnd {
-					if i := p.fencedCode(&out, input[beg:], false); i > 0 {
-						if !lastLineWasBlank {
-							out.WriteByte('\n') // need to inject additional linebreak
-						}
-						lastFencedCodeBlockEnd = beg + i
-					}
-				}
-				lastLineWasBlank = end == beg
-			}
-
-			// add the line body if present
-			if end > beg {
-				if end < lastFencedCodeBlockEnd { // Do not expand tabs while inside fenced code blocks.
-					out.Write(input[beg:end])
-				} else {
-					expandTabs(&out, input[beg:end], tabSize)
-				}
-			}
-			out.WriteByte('\n')
-
-			if end < len(input) && input[end] == '\r' {
-				end++
-			}
-			if end < len(input) && input[end] == '\n' {
-				end++
-			}
-
-			beg = end
+	for beg < len(input) {
+		// Find end of this line, then process the line.
+		end := beg
+		for end < len(input) && input[end] != '\n' && input[end] != '\r' {
+			end++
 		}
+
+		if p.flags&EXTENSION_FENCED_CODE != 0 {
+			// track fenced code block boundaries to suppress tab expansion
+			// and reference extraction inside them:
+			if beg >= lastFencedCodeBlockEnd {
+				if i := p.fencedCodeBlock(&out, input[beg:], false); i > 0 {
+					lastFencedCodeBlockEnd = beg + i
+				}
+			}
+		}
+
+		// add the line body if present
+		if end > beg {
+			if end < lastFencedCodeBlockEnd { // Do not expand tabs while inside fenced code blocks.
+				out.Write(input[beg:end])
+			} else if refEnd := isReference(p, input[beg:], tabSize); refEnd > 0 {
+				beg += refEnd
+				continue
+			} else {
+				expandTabs(&out, input[beg:end], tabSize)
+			}
+		}
+
+		if end < len(input) && input[end] == '\r' {
+			end++
+		}
+		if end < len(input) && input[end] == '\n' {
+			end++
+		}
+		out.WriteByte('\n')
+
+		beg = end
 	}
 
 	// empty input?
@@ -455,7 +461,8 @@ func secondPass(p *parser, input []byte) []byte {
 	if p.flags&EXTENSION_FOOTNOTES != 0 && len(p.notes) > 0 {
 		p.r.Footnotes(&output, func() bool {
 			flags := LIST_ITEM_BEGINNING_OF_LIST
-			for _, ref := range p.notes {
+			for i := 0; i < len(p.notes); i += 1 {
+				ref := p.notes[i]
 				var buf bytes.Buffer
 				if ref.hasBlock {
 					flags |= LIST_ITEM_CONTAINS_BLOCK
@@ -516,6 +523,11 @@ type reference struct {
 	noteId   int // 0 if not a footnote ref
 	hasBlock bool
 	text     []byte
+}
+
+func (r *reference) String() string {
+	return fmt.Sprintf("{link: %q, title: %q, text: %q, noteId: %d, hasBlock: %v}",
+		r.link, r.title, r.text, r.noteId, r.hasBlock)
 }
 
 // Check whether or not data starts with a reference link.
@@ -628,11 +640,11 @@ func scanLinkRef(p *parser, data []byte, i int) (linkOffset, linkEnd, titleOffse
 		i++
 	}
 	linkOffset = i
-	for i < len(data) && data[i] != ' ' && data[i] != '\t' && data[i] != '\n' && data[i] != '\r' {
-		i++
-	}
 	if i == len(data) {
 		return
+	}
+	for i < len(data) && data[i] != ' ' && data[i] != '\t' && data[i] != '\n' && data[i] != '\r' {
+		i++
 	}
 	linkEnd = i
 	if data[linkOffset] == '<' && data[linkEnd-1] == '>' {
@@ -792,7 +804,17 @@ func ispunct(c byte) bool {
 
 // Test if a character is a whitespace character.
 func isspace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+	return ishorizontalspace(c) || isverticalspace(c)
+}
+
+// Test if a character is a horizontal whitespace character.
+func ishorizontalspace(c byte) bool {
+	return c == ' ' || c == '\t'
+}
+
+// Test if a character is a vertical whitespace character.
+func isverticalspace(c byte) bool {
+	return c == '\n' || c == '\r' || c == '\f' || c == '\v'
 }
 
 // Test if a character is letter.

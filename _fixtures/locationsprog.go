@@ -30,8 +30,19 @@ func anotherFunction() {
 func main() {
 	var a SomeType
 	var b OtherType
-	fmt.Printf("%s %s\n", a.String(), b.String())
+	i := 10
+	fmt.Printf("%s %s %v\n", a.String(), b.String(), i)
 	a.SomeFunction()
 	anotherFunction()
 	ioutil.ReadFile("nonexistent.file.txt")
+}
+
+var amap map[string]func()
+
+func init() {
+	amap = map[string]func(){
+		"k": func() {
+			fmt.Printf("hello world")
+		},
+	}
 }
