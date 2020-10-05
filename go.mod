@@ -21,3 +21,5 @@ require (
 	golang.org/x/tools v0.0.0-20191127201027-ecd32218bd7f
 	gopkg.in/yaml.v2 v2.2.1
 )
+
+replace github.com/derekparker/delve v1.4.0 => github.com/go-delve/delve v1.4.0
