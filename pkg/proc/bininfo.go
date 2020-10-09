@@ -1803,7 +1803,7 @@ func (bi *BinaryInfo) addConcreteInlinedSubprogram(entry *dwarf.Entry, originOff
 
 	originIdx, ok := ctxt.abstractOriginTable[originOffset]
 	if !ok {
-		bi.logger.Warnf("reading debug_info: could not find abstract origin of concrete inlined subprogram at %#x (origin offset %#x)", entry.Offset, originOffset)
+		// bi.logger.Warnf("reading debug_info: could not find abstract origin of concrete inlined subprogram at %#x (origin offset %#x)", entry.Offset, originOffset)
 		if entry.Children {
 			reader.SkipChildren()
 		}
@@ -1896,7 +1896,7 @@ func (bi *BinaryInfo) loadDebugInfoMapsInlinedCalls(ctxt *loadDebugInfoMapsConte
 
 			originIdx, ok := ctxt.abstractOriginTable[originOffset]
 			if !ok {
-				bi.logger.Warnf("reading debug_info: could not find abstract origin (%#x) of inlined call at %#x", originOffset, entry.Offset)
+				// bi.logger.Warnf("reading debug_info: could not find abstract origin (%#x) of inlined call at %#x", originOffset, entry.Offset)
 				reader.SkipChildren()
 				continue
 			}
