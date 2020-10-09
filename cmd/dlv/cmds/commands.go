@@ -27,6 +27,7 @@ import (
 	"github.com/go-delve/delve/service/rpc2"
 	"github.com/go-delve/delve/service/rpccommon"
 	"github.com/mattn/go-isatty"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -876,6 +877,7 @@ func execute(attachPid int, processArgs []string, conf *config.Config, coreFile 
 			client := rpc2.NewClient(listener.Addr().String())
 			client.Disconnect(true) // true = continue after disconnect
 		}
+		logrus.WithFields(logrus.Fields{"layer": "dlv"}).Warnln("Proc paused, waiting for remote dlv connection ...")
 		waitForDisconnectSignal(disconnectChan)
 		err = server.Stop()
 		if err != nil {
