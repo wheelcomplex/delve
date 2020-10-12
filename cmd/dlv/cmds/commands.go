@@ -46,6 +46,8 @@ var (
 	exitOnProcExited bool
 	// apiVersion is the requested API version while running headless
 	apiVersion int
+	// maxStringLen set the maximum string length that the commands print.
+	maxStringLen int
 	// acceptMulti allows multiple clients to connect to the same server
 	acceptMulti bool
 	// addr is the debugging server listen address.
@@ -127,6 +129,7 @@ func New(docCall bool) *cobra.Command {
 	rootCommand.PersistentFlags().BoolVarP(&acceptMulti, "accept-multiclient", "", false, "Allows a headless server to accept multiple client connections.")
 	rootCommand.PersistentFlags().BoolVarP(&exitOnProcExited, "exit-on-proc-exited", "", false, "Debugger exit when the debugged process exited.")
 	rootCommand.PersistentFlags().IntVar(&apiVersion, "api-version", 1, "Selects API version when headless. New clients should use v2. Can be reset via RPCServer.SetApiVersion. See Documentation/api/json-rpc/README.md.")
+	rootCommand.PersistentFlags().IntVar(&maxStringLen, "max-string-len", 64, "Set the maximum string length that the commands print, overide the setting from config.")
 	rootCommand.PersistentFlags().StringVar(&initFile, "init", "", "Init file, executed by the terminal client.")
 	rootCommand.PersistentFlags().StringVar(&buildFlags, "build-flags", buildFlagsDefault, "Build flags, to be passed to the compiler.")
 	rootCommand.PersistentFlags().StringVar(&workingDir, "wd", "", "Working directory for running the program.")
@@ -832,6 +835,7 @@ func execute(attachPid int, processArgs []string, conf *config.Config, coreFile 
 			AcceptMulti:        acceptMulti,
 			APIVersion:         apiVersion,
 			ExitOnProcExited:   exitOnProcExited,
+			MaxStringLen:       maxStringLen,
 			CheckLocalConnUser: checkLocalConnUser,
 			DisconnectChan:     disconnectChan,
 			Debugger: debugger.Config{

@@ -30,6 +30,9 @@ type Config struct {
 	// ExitOnProcExited exit debugger when application exited
 	ExitOnProcExited bool
 
+	// MaxStringLen set the maximum string length that the commands print.
+	MaxStringLen int
+
 	// APIVersion selects which version of the API to serve (default: 1).
 	APIVersion int
 
