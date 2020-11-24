@@ -91,7 +91,7 @@ func evalScope(p *proc.Target) (*proc.EvalScope, error) {
 	if err != nil {
 		return nil, err
 	}
-	return proc.FrameToScope(p.BinInfo(), p.CurrentThread(), nil, frame), nil
+	return proc.FrameToScope(p.BinInfo(), p.Memory(), nil, frame), nil
 }
 
 func evalVariable(p *proc.Target, symbol string, cfg proc.LoadConfig) (*proc.Variable, error) {
@@ -131,9 +131,9 @@ func withTestProcessArgs(name string, t *testing.T, wd string, args []string, bu
 	var tracedir string
 	switch testBackend {
 	case "native":
-		p, err = native.Launch(append([]string{fixture.Path}, args...), wd, false, []string{}, "", [3]string{})
+		p, err = native.Launch(append([]string{fixture.Path}, args...), wd, 0, []string{}, "", [3]string{})
 	case "lldb":
-		p, err = gdbserial.LLDBLaunch(append([]string{fixture.Path}, args...), wd, false, []string{}, "", [3]string{})
+		p, err = gdbserial.LLDBLaunch(append([]string{fixture.Path}, args...), wd, 0, []string{}, "", [3]string{})
 	case "rr":
 		protest.MustHaveRecordingAllowed(t)
 		t.Log("recording")
@@ -442,6 +442,7 @@ func TestLocalVariables(t *testing.T) {
 				{"f32", true, "1.2", "", "float32", nil},
 				{"i32", true, "[2]int32 [1,2]", "", "[2]int32", nil},
 				{"i8", true, "1", "", "int8", nil},
+				{"mp", true, "map[int]interface {} [1: 42, 2: 43, ]", "", "map[int]interface {}", nil},
 				{"ms", true, "main.Nest {Level: 0, Nest: *main.Nest {Level: 1, Nest: *(*main.Nest)…", "", "main.Nest", nil},
 				{"neg", true, "-1", "", "int", nil},
 				{"u16", true, "65535", "", "uint16", nil},
@@ -468,7 +469,7 @@ func TestLocalVariables(t *testing.T) {
 				var frame proc.Stackframe
 				frame, err = findFirstNonRuntimeFrame(p)
 				if err == nil {
-					scope = proc.FrameToScope(p.BinInfo(), p.CurrentThread(), nil, frame)
+					scope = proc.FrameToScope(p.BinInfo(), p.Memory(), nil, frame)
 				}
 			} else {
 				scope, err = proc.GoroutineScope(p.CurrentThread())
@@ -1150,9 +1151,6 @@ type testCaseCallFunction struct {
 }
 
 func TestCallFunction(t *testing.T) {
-	if runtime.GOARCH == "arm64" {
-		t.Skip("arm64 does not support CallFunction for now")
-	}
 	protest.MustSupportFunctionCalls(t, testBackend)
 
 	var testcases = []testCaseCallFunction{

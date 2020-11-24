@@ -120,6 +120,9 @@ type Config struct {
 
 	// Redirects specifies redirect rules for stdin, stdout and stderr
 	Redirects [3]string
+
+	// DisableASLR disables ASLR
+	DisableASLR bool
 }
 
 // New creates a new Debugger. ProcessArgs specify the commandline arguments for the
@@ -222,11 +225,20 @@ func (d *Debugger) Launch(processArgs []string, wd string) (*proc.Target, error)
 	if err := verifyBinaryFormat(processArgs[0]); err != nil {
 		return nil, err
 	}
+
+	launchFlags := proc.LaunchFlags(0)
+	if d.config.Foreground {
+		launchFlags |= proc.LaunchForeground
+	}
+	if d.config.DisableASLR {
+		launchFlags |= proc.LaunchDisableASLR
+	}
+
 	switch d.config.Backend {
 	case "native":
-		return native.Launch(processArgs, wd, d.config.Foreground, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects)
+		return native.Launch(processArgs, wd, launchFlags, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects)
 	case "lldb":
-		return betterGdbserialLaunchError(gdbserial.LLDBLaunch(processArgs, wd, d.config.Foreground, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects))
+		return betterGdbserialLaunchError(gdbserial.LLDBLaunch(processArgs, wd, launchFlags, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects))
 	case "rr":
 		if d.target != nil {
 			// restart should not call us if the backend is 'rr'
@@ -268,9 +280,9 @@ func (d *Debugger) Launch(processArgs []string, wd string) (*proc.Target, error)
 
 	case "default":
 		if runtime.GOOS == "darwin" {
-			return betterGdbserialLaunchError(gdbserial.LLDBLaunch(processArgs, wd, d.config.Foreground, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects))
+			return betterGdbserialLaunchError(gdbserial.LLDBLaunch(processArgs, wd, launchFlags, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects))
 		}
-		return native.Launch(processArgs, wd, d.config.Foreground, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects)
+		return native.Launch(processArgs, wd, launchFlags, d.config.DebugInfoDirectories, d.config.TTY, d.config.Redirects)
 	default:
 		return nil, fmt.Errorf("unknown backend %q", d.config.Backend)
 	}
@@ -369,9 +381,8 @@ func (d *Debugger) FunctionReturnLocations(fnName string) ([]uint64, error) {
 	}
 
 	var regs proc.Registers
-	var mem proc.MemoryReadWriter = p.CurrentThread()
+	mem := p.Memory()
 	if g != nil && g.Thread != nil {
-		mem = g.Thread
 		regs, _ = g.Thread.Registers()
 	}
 	instructions, err := proc.Disassemble(mem, regs, p.Breakpoints(), p.BinInfo(), fn.Entry, fn.End)
@@ -1362,7 +1373,7 @@ func (d *Debugger) convertStacktrace(rawlocs []proc.Stackframe, cfg *proc.LoadCo
 		}
 		if cfg != nil && rawlocs[i].Current.Fn != nil {
 			var err error
-			scope := proc.FrameToScope(d.target.BinInfo(), d.target.CurrentThread(), nil, rawlocs[i:]...)
+			scope := proc.FrameToScope(d.target.BinInfo(), d.target.Memory(), nil, rawlocs[i:]...)
 			locals, err := scope.LocalVariables(*cfg)
 			if err != nil {
 				return nil, err
@@ -1432,7 +1443,7 @@ func (d *Debugger) CurrentPackage() (string, error) {
 }
 
 // FindLocation will find the location specified by 'locStr'.
-func (d *Debugger) FindLocation(goid, frame, deferredCall int, locStr string, includeNonExecutableLines bool) ([]api.Location, error) {
+func (d *Debugger) FindLocation(goid, frame, deferredCall int, locStr string, includeNonExecutableLines bool, substitutePathRules [][2]string) ([]api.Location, error) {
 	d.targetMutex.Lock()
 	defer d.targetMutex.Unlock()
 
@@ -1447,7 +1458,7 @@ func (d *Debugger) FindLocation(goid, frame, deferredCall int, locStr string, in
 
 	s, _ := proc.ConvertEvalScope(d.target, goid, frame, deferredCall)
 
-	locs, err := loc.Find(d.target, d.processArgs, s, locStr, includeNonExecutableLines)
+	locs, err := loc.Find(d.target, d.processArgs, s, locStr, includeNonExecutableLines, substitutePathRules)
 	for i := range locs {
 		if locs[i].PC == 0 {
 			continue
@@ -1490,7 +1501,7 @@ func (d *Debugger) Disassemble(goroutineID int, addr1, addr2 uint64) ([]proc.Asm
 	}
 	regs, _ := curthread.Registers()
 
-	return proc.Disassemble(curthread, regs, d.target.Breakpoints(), d.target.BinInfo(), addr1, addr2)
+	return proc.Disassemble(d.target.Memory(), regs, d.target.Breakpoints(), d.target.BinInfo(), addr1, addr2)
 }
 
 func (d *Debugger) AsmInstructionText(inst *proc.AsmInstruction, flavour proc.AssemblyFlavour) string {
@@ -1504,6 +1515,24 @@ func (d *Debugger) Recorded() (recorded bool, tracedir string) {
 	d.targetMutex.Lock()
 	defer d.targetMutex.Unlock()
 	return d.target.Recorded()
+}
+
+// FindThreadReturnValues returns the return values of the function that
+// the thread of the given 'id' just stepped out of.
+func (d *Debugger) FindThreadReturnValues(id int, cfg proc.LoadConfig) ([]*proc.Variable, error) {
+	d.targetMutex.Lock()
+	defer d.targetMutex.Unlock()
+
+	if _, err := d.target.Valid(); err != nil {
+		return nil, err
+	}
+
+	thread, found := d.target.FindThread(id)
+	if !found {
+		return nil, fmt.Errorf("could not find thread %d", id)
+	}
+
+	return thread.Common().ReturnValues(cfg), nil
 }
 
 // Checkpoint will set a checkpoint specified by the locspec.
@@ -1542,9 +1571,9 @@ func (d *Debugger) ExamineMemory(address uint64, length int) ([]byte, error) {
 	d.targetMutex.Lock()
 	defer d.targetMutex.Unlock()
 
-	thread := d.target.CurrentThread()
+	mem := d.target.Memory()
 	data := make([]byte, length)
-	n, err := thread.ReadMemory(data, address)
+	n, err := mem.ReadMemory(data, address)
 	if err != nil {
 		return nil, err
 	}
@@ -1600,6 +1629,15 @@ func (d *Debugger) StopRecording() error {
 		return ErrNotRecording
 	}
 	return d.stopRecording()
+}
+
+// StopReason returns the reason the reason why the target process is stopped.
+// A process could be stopped for multiple simultaneous reasons, in which
+// case only one will be reported.
+func (d *Debugger) StopReason() proc.StopReason {
+	d.targetMutex.Lock()
+	defer d.targetMutex.Unlock()
+	return d.target.StopReason
 }
 
 // LockTarget acquires the target mutex.

@@ -12,7 +12,7 @@ import (
 var ErrNativeBackendDisabled = errors.New("native backend disabled during compilation")
 
 // Launch returns ErrNativeBackendDisabled.
-func Launch(_ []string, _ string, _ bool, _ []string, _ string, _ [3]string) (*proc.Target, error) {
+func Launch(_ []string, _ string, _ proc.LaunchFlags, _ []string, _ string, _ [3]string) (*proc.Target, error) {
 	return nil, ErrNativeBackendDisabled
 }
 
@@ -59,7 +59,7 @@ func (dbp *nativeProcess) trapWait(pid int) (*nativeThread, error) {
 	panic(ErrNativeBackendDisabled)
 }
 
-func (dbp *nativeProcess) stop(trapthread *nativeThread) (err error) {
+func (dbp *nativeProcess) stop(trapthread *nativeThread) (*nativeThread, error) {
 	panic(ErrNativeBackendDisabled)
 }
 
@@ -78,11 +78,6 @@ func (dbp *nativeProcess) detach(kill bool) error {
 // EntryPoint returns the entry point for the process,
 // useful for PIEs.
 func (dbp *nativeProcess) EntryPoint() (uint64, error) {
-	panic(ErrNativeBackendDisabled)
-}
-
-// Blocked returns true if the thread is blocked
-func (t *nativeThread) Blocked() bool {
 	panic(ErrNativeBackendDisabled)
 }
 

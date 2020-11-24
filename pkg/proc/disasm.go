@@ -71,7 +71,7 @@ type opcodeSeq []uint64
 // If sameline is set firstPCAfterPrologueDisassembly will always return an
 // address associated with the same line as fn.Entry
 func firstPCAfterPrologueDisassembly(p Process, fn *Function, sameline bool) (uint64, error) {
-	var mem MemoryReadWriter = p.CurrentThread()
+	mem := p.Memory()
 	breakpoints := p.Breakpoints()
 	bi := p.BinInfo()
 	text, err := disassemble(mem, nil, breakpoints, bi, fn.Entry, fn.End, false)
@@ -83,7 +83,7 @@ func firstPCAfterPrologueDisassembly(p Process, fn *Function, sameline bool) (ui
 		return fn.Entry, nil
 	}
 
-	for _, prologue := range p.BinInfo().Arch.Prologues() {
+	for _, prologue := range p.BinInfo().Arch.prologues {
 		if len(prologue) >= len(text) {
 			continue
 		}

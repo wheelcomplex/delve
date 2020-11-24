@@ -70,6 +70,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -93,10 +94,32 @@ const (
 
 const heartbeatInterval = 10 * time.Second
 
+// Relative to $(xcode-select --print-path)/../
+// xcode-select typically returns the path to the Developer directory, which is a sibling to SharedFrameworks.
+var debugserverXcodeRelativeExecutablePath = "SharedFrameworks/LLDB.framework/Versions/A/Resources/debugserver"
+
 var debugserverExecutablePaths = []string{
 	"debugserver",
 	"/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/Versions/A/Resources/debugserver",
-	"/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Versions/A/Resources/debugserver",
+	// Function returns the active developer directory provided by xcode-select to compute a debugserver path.
+	func() string {
+		if _, err := exec.LookPath("xcode-select"); err != nil {
+			return ""
+		}
+
+		stdout, err := exec.Command("xcode-select", "--print-path").Output()
+		if err != nil {
+			return ""
+		}
+
+		xcodePath := strings.TrimSpace(string(stdout))
+		if xcodePath == "" {
+			return ""
+		}
+
+		// xcode-select prints the path to the active Developer directory, which is typically a sibling to SharedFrameworks.
+		return filepath.Join(xcodePath, "..", debugserverXcodeRelativeExecutablePath)
+	}(),
 }
 
 // ErrDirChange is returned when trying to change execution direction
@@ -308,6 +331,9 @@ func unusedPort() string {
 // found in the system path ($PATH), the Xcode bundle or the standalone CLT location.
 func getDebugServerAbsolutePath() string {
 	for _, debugServerPath := range debugserverExecutablePaths {
+		if debugServerPath == "" {
+			continue
+		}
 		if _, err := exec.LookPath(debugServerPath); err == nil {
 			return debugServerPath
 		}
@@ -342,18 +368,12 @@ func getLdEnvVars() []string {
 // LLDBLaunch starts an instance of lldb-server and connects to it, asking
 // it to launch the specified target program with the specified arguments
 // (cmd) on the specified directory wd.
-func LLDBLaunch(cmd []string, wd string, foreground bool, debugInfoDirs []string, tty string, redirects [3]string) (*proc.Target, error) {
+func LLDBLaunch(cmd []string, wd string, flags proc.LaunchFlags, debugInfoDirs []string, tty string, redirects [3]string) (*proc.Target, error) {
 	if runtime.GOOS == "windows" {
 		return nil, ErrUnsupportedOS
 	}
 
-	if foreground {
-		// Disable foregrounding if we can't open /dev/tty or debugserver will
-		// crash. See issue #1215.
-		if !isatty.IsTerminal(os.Stdin.Fd()) {
-			foreground = false
-		}
-	}
+	foreground := flags&proc.LaunchForeground != 0
 
 	var (
 		isDebugserver bool
@@ -361,6 +381,7 @@ func LLDBLaunch(cmd []string, wd string, foreground bool, debugInfoDirs []string
 		port          string
 		process       *exec.Cmd
 		err           error
+		hasRedirects  bool
 	)
 
 	if debugserverExecutable := getDebugServerAbsolutePath(); debugserverExecutable != "" {
@@ -380,18 +401,15 @@ func LLDBLaunch(cmd []string, wd string, foreground bool, debugInfoDirs []string
 			for i := range redirects {
 				if redirects[i] != "" {
 					found[i] = true
+					hasRedirects = true
 					args = append(args, fmt.Sprintf("--%s-path", names[i]), redirects[i])
 				}
 			}
 
-			if foreground {
-				if !found[0] && !found[1] && !found[2] {
-					args = append(args, "--stdio-path", "/dev/tty")
-				} else {
-					for i := range found {
-						if !found[i] {
-							args = append(args, fmt.Sprintf("--%s-path", names[i]), "/dev/tty")
-						}
+			if foreground || hasRedirects {
+				for i := range found {
+					if !found[i] {
+						args = append(args, fmt.Sprintf("--%s-path", names[i]), "/dev/"+names[i])
 					}
 				}
 			}
@@ -399,6 +417,9 @@ func LLDBLaunch(cmd []string, wd string, foreground bool, debugInfoDirs []string
 
 		if logflags.LLDBServerOutput() {
 			args = append(args, "-g", "-l", "stdout")
+		}
+		if flags&proc.LaunchDisableASLR != 0 {
+			args = append(args, "-D")
 		}
 		args = append(args, "-F", "-R", fmt.Sprintf("127.0.0.1:%d", listener.Addr().(*net.TCPAddr).Port), "--")
 		args = append(args, cmd...)
@@ -418,19 +439,23 @@ func LLDBLaunch(cmd []string, wd string, foreground bool, debugInfoDirs []string
 		process = commandLogger("lldb-server", args...)
 	}
 
-	if logflags.LLDBServerOutput() || logflags.GdbWire() || foreground {
+	if logflags.LLDBServerOutput() || logflags.GdbWire() || foreground || hasRedirects {
 		process.Stdout = os.Stdout
 		process.Stderr = os.Stderr
 	}
-	if foreground {
-		foregroundSignalsIgnore()
+	if foreground || hasRedirects {
+		if isatty.IsTerminal(os.Stdin.Fd()) {
+			foregroundSignalsIgnore()
+		}
 		process.Stdin = os.Stdin
 	}
 	if wd != "" {
 		process.Dir = wd
 	}
 
-	process.SysProcAttr = sysProcAttr(foreground)
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		process.SysProcAttr = sysProcAttr(foreground)
+	}
 
 	if runtime.GOOS == "darwin" {
 		process.Env = proc.DisableAsyncPreemptEnv()
@@ -571,7 +596,7 @@ func (p *gdbProcess) initialize(path string, debugInfoDirs []string, stopReason 
 			return nil, err
 		}
 	}
-	tgt, err := proc.NewTarget(p, proc.NewTargetConfig{
+	tgt, err := proc.NewTarget(p, p.currentThread, proc.NewTargetConfig{
 		Path:                path,
 		DebugInfoDirs:       debugInfoDirs,
 		DisableAsyncPreempt: runtime.GOOS == "darwin",
@@ -644,15 +669,9 @@ func (p *gdbProcess) ThreadList() []proc.Thread {
 	return r
 }
 
-// CurrentThread returns the current active
-// selected thread.
-func (p *gdbProcess) CurrentThread() proc.Thread {
-	return p.currentThread
-}
-
-// SetCurrentThread is used internally by proc.Target to change the current thread.
-func (p *gdbProcess) SetCurrentThread(th proc.Thread) {
-	p.currentThread = th.(*gdbThread)
+// Memory returns the process memory.
+func (p *gdbProcess) Memory() proc.MemoryReadWriter {
+	return p
 }
 
 const (
@@ -770,6 +789,7 @@ continueLoop:
 		// the signals that are reported here can not be propagated back to the target process.
 		trapthread.sig = 0
 	}
+	p.currentThread = trapthread
 	return trapthread, stopReason, err
 }
 
@@ -932,9 +952,9 @@ func (p *gdbProcess) Detach(kill bool) error {
 }
 
 // Restart will restart the process from the given position.
-func (p *gdbProcess) Restart(pos string) error {
+func (p *gdbProcess) Restart(pos string) (proc.Thread, error) {
 	if p.tracedir == "" {
-		return proc.ErrNotRecorded
+		return nil, proc.ErrNotRecorded
 	}
 
 	p.exited = false
@@ -947,19 +967,19 @@ func (p *gdbProcess) Restart(pos string) error {
 
 	err := p.conn.restart(pos)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// for some reason we have to send a vCont;c after a vRun to make rr behave
 	// properly, because that's what gdb does.
 	_, _, err = p.conn.resume(nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	err = p.updateThreadList(&threadUpdater{p: p})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	p.clearThreadSignals()
 	p.clearThreadRegisters()
@@ -968,7 +988,7 @@ func (p *gdbProcess) Restart(pos string) error {
 		p.conn.setBreakpoint(addr)
 	}
 
-	return p.setCurrentBreakpoints()
+	return p.currentThread, p.setCurrentBreakpoints()
 }
 
 // When executes the 'when' command for the Mozilla RR backend.
@@ -1260,8 +1280,8 @@ func (p *gdbProcess) setCurrentBreakpoints() error {
 }
 
 // ReadMemory will read into 'data' memory at the address provided.
-func (t *gdbThread) ReadMemory(data []byte, addr uint64) (n int, err error) {
-	err = t.p.conn.readMemory(data, addr)
+func (p *gdbProcess) ReadMemory(data []byte, addr uint64) (n int, err error) {
+	err = p.conn.readMemory(data, addr)
 	if err != nil {
 		return 0, err
 	}
@@ -1269,8 +1289,12 @@ func (t *gdbThread) ReadMemory(data []byte, addr uint64) (n int, err error) {
 }
 
 // WriteMemory will write into the memory at 'addr' the data provided.
-func (t *gdbThread) WriteMemory(addr uint64, data []byte) (written int, err error) {
-	return t.p.conn.writeMemory(addr, data)
+func (p *gdbProcess) WriteMemory(addr uint64, data []byte) (written int, err error) {
+	return p.conn.writeMemory(addr, data)
+}
+
+func (t *gdbThread) ProcessMemory() proc.MemoryReadWriter {
+	return t.p
 }
 
 // Location returns the current location of this thread.
@@ -1517,18 +1541,18 @@ func (t *gdbThread) reloadGAtPC() error {
 	}
 
 	savedcode := make([]byte, len(movinstr))
-	_, err := t.ReadMemory(savedcode, pc)
+	_, err := t.p.ReadMemory(savedcode, pc)
 	if err != nil {
 		return err
 	}
 
-	_, err = t.WriteMemory(pc, movinstr)
+	_, err = t.p.WriteMemory(pc, movinstr)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
-		_, err0 := t.WriteMemory(pc, savedcode)
+		_, err0 := t.p.WriteMemory(pc, savedcode)
 		if err == nil {
 			err = err0
 		}

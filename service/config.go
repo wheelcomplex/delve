@@ -27,7 +27,7 @@ type Config struct {
 	// Note that the server API is not reentrant and clients will have to coordinate.
 	AcceptMulti bool
 
-	// ExitOnProcExited exit debugger when application exited
+	// ExitOnProcExited tell debugger to quit when debugging application exited
 	ExitOnProcExited bool
 
 	// MaxStringLen set the maximum string length that the commands print.

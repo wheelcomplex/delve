@@ -138,8 +138,7 @@ func (s *RPCServer) Command(command api.DebuggerCommand, cb service.RPCCallback)
 	var out CommandOut
 	out.State = *st
 	cb.Return(out, nil)
-	if st.Exited && s.config.ExitOnProcExited {
-		time.Sleep(500 * time.Millisecond)
+	if s.config.ExitOnProcExited && st.Exited {
 		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 	}
 }
@@ -605,6 +604,13 @@ type FindLocationIn struct {
 	Scope                     api.EvalScope
 	Loc                       string
 	IncludeNonExecutableLines bool
+
+	// SubstitutePathRules is a slice of source code path substitution rules,
+	// the first entry of each pair is the path of a directory as it appears in
+	// the executable file (i.e. the location of a source file when the program
+	// was compiled), the second entry of each pair is the location of the same
+	// directory on the client system.
+	SubstitutePathRules [][2]string
 }
 
 type FindLocationOut struct {
@@ -626,7 +632,7 @@ type FindLocationOut struct {
 // NOTE: this function does not actually set breakpoints.
 func (c *RPCServer) FindLocation(arg FindLocationIn, out *FindLocationOut) error {
 	var err error
-	out.Locations, err = c.debugger.FindLocation(arg.Scope.GoroutineID, arg.Scope.Frame, arg.Scope.DeferredCall, arg.Loc, arg.IncludeNonExecutableLines)
+	out.Locations, err = c.debugger.FindLocation(arg.Scope.GoroutineID, arg.Scope.Frame, arg.Scope.DeferredCall, arg.Loc, arg.IncludeNonExecutableLines, arg.SubstitutePathRules)
 	return err
 }
 

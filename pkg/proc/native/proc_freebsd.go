@@ -42,11 +42,13 @@ type osProcessDetails struct {
 // to be supplied to that process. `wd` is working directory of the program.
 // If the DWARF information cannot be found in the binary, Delve will look
 // for external debug files in the directories passed in.
-func Launch(cmd []string, wd string, foreground bool, debugInfoDirs []string, tty string, redirects [3]string) (*proc.Target, error) {
+func Launch(cmd []string, wd string, flags proc.LaunchFlags, debugInfoDirs []string, tty string, redirects [3]string) (*proc.Target, error) {
 	var (
 		process *exec.Cmd
 		err     error
 	)
+
+	foreground := flags&proc.LaunchForeground != 0
 
 	stdin, stdout, stderr, closefn, err := openRedirects(redirects, foreground)
 	if err != nil {
@@ -178,8 +180,8 @@ func (dbp *nativeProcess) addThread(tid int, attach bool) (*nativeThread, error)
 		os:  new(osSpecificDetails),
 	}
 
-	if dbp.currentThread == nil {
-		dbp.currentThread = dbp.threads[tid]
+	if dbp.memthread == nil {
+		dbp.memthread = dbp.threads[tid]
 	}
 
 	return dbp.threads[tid], nil
@@ -345,19 +347,19 @@ func (dbp *nativeProcess) resume() error {
 
 // Used by ContinueOnce
 // stop stops all running threads and sets breakpoints
-func (dbp *nativeProcess) stop(trapthread *nativeThread) (err error) {
+func (dbp *nativeProcess) stop(trapthread *nativeThread) (*nativeThread, error) {
 	if dbp.exited {
-		return &proc.ErrProcessExited{Pid: dbp.Pid()}
+		return nil, &proc.ErrProcessExited{Pid: dbp.Pid()}
 	}
 	// set breakpoints on all threads
 	for _, th := range dbp.threads {
 		if th.CurrentBreakpoint.Breakpoint == nil {
 			if err := th.SetCurrentBreakpoint(true); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return nil
+	return trapthread, nil
 }
 
 // Used by Detach
